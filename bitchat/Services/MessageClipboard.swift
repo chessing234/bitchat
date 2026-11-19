@@ -28,19 +28,24 @@ enum MessageClipboard {
     }
 
     /// Builds a composer-ready quote block (`> line` per line, trailing blank).
-    /// Sender header is plain text (`> alice:`), not `@alice`, so quoting does
-    /// not re-fire mention notifications for the quoted person or for names
-    /// inside the quoted body (those stay behind `> ` and are not live tokens).
+    /// The sender header does not add `@`. In the body, U+200B after each mention's
+    /// `@` keeps the name readable without leaving a live token for send/receive
+    /// parsing or rendering. Neither `> ` nor a backslash escapes mentions.
     static func quoteForComposer(_ content: String, sender: String?) -> String {
         let body = content.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !body.isEmpty else { return "" }
+        let literalBody = MessageFormattingEngine.Patterns.mention.stringByReplacingMatches(
+            in: body,
+            range: NSRange(location: 0, length: (body as NSString).length),
+            withTemplate: "@\u{200B}$1"
+        )
         let header: String
         if let sender, !sender.isEmpty, sender != "system" {
             header = "> \(sender):\n"
         } else {
             header = ""
         }
-        let quoted = body
+        let quoted = literalBody
             .split(separator: "\n", omittingEmptySubsequences: false)
             .map { "> \($0)" }
             .joined(separator: "\n")

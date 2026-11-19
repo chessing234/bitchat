@@ -182,6 +182,74 @@ struct ChatComposerCoordinatorContextTests {
     }
 
     @Test @MainActor
+    func parseMentions_generatedQuoteDoesNotMentionKnownPeersOrSelf() {
+        let context = MockChatComposerContext()
+        let coordinator = ChatComposerCoordinator(context: context)
+        context.meshNicknamesByPeerID = [
+            PeerID(str: "1111111111111111"): "bob",
+            PeerID(str: "2222222222222222"): "日本語"
+        ]
+        let content = "👋 hello @bob\n再会 @日本語 and @me#0011"
+        #expect(Set(coordinator.parseMentions(from: content)) == ["bob", "日本語", "me#0011"])
+
+        let draft = MessageClipboard.appendQuote(to: "", content: content, sender: "alice")
+        #expect(coordinator.parseMentions(from: draft).isEmpty)
+        // Public mesh and Nostr ingress trim content before re-parsing it.
+        #expect(coordinator.parseMentions(from: draft.trimmed).isEmpty)
+    }
+
+    @Test @MainActor
+    func parseMentions_quotePreservesDeliberateMentionsThroughPrivatePacket() throws {
+        let context = MockChatComposerContext()
+        let coordinator = ChatComposerCoordinator(context: context)
+        context.meshNicknamesByPeerID = [PeerID(str: "1111111111111111"): "bob"]
+        let draft = MessageClipboard.appendQuote(
+            to: "before @me",
+            content: "hello @bob\n再会 @me#0011",
+            sender: "alice"
+        ) + "after @bob"
+        #expect(Set(coordinator.parseMentions(from: draft)) == ["me", "bob"])
+
+        // Noise DM ingress decodes the real packet and parses its content again.
+        let payload = try #require(PrivateMessagePacket(messageID: "quote-regression", content: draft).encode())
+        let received = try #require(PrivateMessagePacket.decode(from: payload))
+        #expect(received.content == draft)
+        context.nickname = "bob"
+        context.meshNicknamesByPeerID = [PeerID(str: "0011223344556677"): "me"]
+        #expect(Set(coordinator.parseMentions(from: received.content)) == ["me", "bob"])
+    }
+
+    @Test @MainActor
+    func parseMentions_generatedQuoteAccountsForPrivatePacketUTF8Limit() throws {
+        let context = MockChatComposerContext()
+        let coordinator = ChatComposerCoordinator(context: context)
+        context.meshNicknamesByPeerID = [PeerID(str: "1111111111111111"): "bob"]
+
+        for extraByteCount in 0...1 {
+            let content = String(repeating: "x", count: extraByteCount) + String(repeating: "é", count: 118) + " @bob"
+            // Match the composer's trimming before send. The old quote fits in both cases.
+            let originalQuote = "> alice:\n> " + content
+            let quoted = MessageClipboard.quoteForComposer(content, sender: "alice").trimmed
+            #expect(originalQuote.utf8.count == 252 + extraByteCount)
+            #expect(PrivateMessagePacket(messageID: "quote-budget", content: originalQuote).encode() != nil)
+            #expect(coordinator.parseMentions(from: originalQuote) == ["bob"])
+            // U+200B adds three bytes, not one, without changing the TLV limit.
+            #expect(quoted.utf8.count == 255 + extraByteCount)
+            #expect(coordinator.parseMentions(from: quoted).isEmpty)
+
+            let packet = PrivateMessagePacket(messageID: "quote-budget", content: quoted)
+            if extraByteCount == 0 {
+                let payload = try #require(packet.encode())
+                let received = try #require(PrivateMessagePacket.decode(from: payload))
+                #expect(received.content == quoted)
+                #expect(coordinator.parseMentions(from: received.content).isEmpty)
+            } else {
+                #expect(packet.encode() == nil)
+            }
+        }
+    }
+
+    @Test @MainActor
     func parseMentions_acceptsKnownPeersOwnNicknameAndHashSuffix() {
         let context = MockChatComposerContext()
         let coordinator = ChatComposerCoordinator(context: context)
